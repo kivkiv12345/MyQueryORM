@@ -1,0 +1,1 @@
+Code-first ORM based on the implementation in MyQueryHouse (https://github.com/kivkiv12345/MyQueryHouse)
