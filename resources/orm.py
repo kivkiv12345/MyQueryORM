@@ -7,7 +7,7 @@ if __name__ == '__main__':
     raise SystemExit("(⊙＿⊙') Wha!?... Are you trying to run orm.py?\n"
                      " You know this is a bad idea; right? You should run app.py instead :)")
 
-from typing import Any, Union, ItemsView, ValuesView, Type
+from typing import Any, Union, ItemsView, ValuesView, Type, NamedTuple
 from mysql.connector.cursor import CursorBase
 from mysql.connector.connection import MySQLConnection
 try:
@@ -18,12 +18,6 @@ except ImportError:
 from copy import copy
 from resources.enums import FieldTypes, DatabaseLocations
 from resources.exceptions import AbstractInstantiationError
-
-CONNECTION: MySQLConnection = None
-CURSOR: CMySQLCursor = None
-
-DATABASE_NAME = "myqueryhouse"  # Must match the name of the database restoration file!
-database_location: DatabaseLocations = None
 
 
 class LazyQueryDict(dict):
@@ -164,7 +158,6 @@ class ModelField:
 
 Models: set["DBModel"] = set()
 _foreignkey_relationships: dict[str, dict[str, tuple[str, str]]] = {}
-DBModel = None  # Workaround to make sure DBModel is defined when _DBModelMeta.__init__() runs for DBModel.
 
 
 class _DBModelMeta(type):
@@ -174,8 +167,11 @@ class _DBModelMeta(type):
     """
 
     def __init__(cls, name: str, bases: tuple, dct: dict) -> None:
-        if DBModel is not None:  # meta __init__ is also called for DBModel, which is not a database table.
-            Models.add(cls)
+        try:
+            if DBModel is not None:  # meta __init__ is also called for DBModel, which is not a database table.
+                Models.add(cls)
+        except NameError:
+            pass  # This will be called on DBModel itself, before it is defined.
         super().__init__(cls)
 
     @property
@@ -186,12 +182,23 @@ class _DBModelMeta(type):
         return QuerySet(cls)
 
 
+class ModelMeta(NamedTuple):
+    pk_column: str  # TODO Kevin: Dunno if I should keep this
+    table_name: str
+    database_name: str
+    fields: dict[str, Any]
+
+    def __str__(self) -> str:
+        return f"Meta for {self.table_name}"
+
+
 class DBModel(metaclass=_DBModelMeta):
     """ Django'esque model class which converts table rows to Python class instances. """
 
     model = None
     values: dict[str, Any] = None  # Holds the values of the instances.
     _initial_values: dict[str, Any] = None  # Holds the initial values for comparison when saving.
+    meta: ModelMeta = None
 
     def __init__(self, *args, zipped_data: zip = None, **kwargs) -> None:
         """
@@ -250,19 +257,6 @@ class DBModel(metaclass=_DBModelMeta):
 
     def delete(self): raise NotImplementedError("Cannot delete yet!")
 
-    class Meta:
-        """ Holds information about the makeup of the current class. """
-        _col_hint = Union[str, None]
-
-        table_name: str = None
-        pk_column: str = None
-        fields: tuple[ModelField, ...] = None
-        fieldnames: tuple[str] = ()
-        column_data: tuple[tuple[_col_hint, bytes, _col_hint, _col_hint, _col_hint, _col_hint], ...]
-
-        def __str__(self) -> str:
-            return f"Meta for {self.table_name}"
-
     def __str__(self) -> str:
         """ :return: The class name paired with its primary key, when referring to an instance. Otherwise returns super. """
         return f"{self.__class__.__name__} object ({self.pk})" if self.pk else super(DBModel, self).__str__()
@@ -274,73 +268,4 @@ class DBModel(metaclass=_DBModelMeta):
             return False
 
 
-def init_orm(cursor: CursorBase, db_name: str) -> set[DBModel]:
-    """
-    Populates the global Models dictionary with models matching tables in the database.
-    Ought to only ever be run once during the app startup.
 
-    :param cursor: Cursor to use when querying the database.
-    :param db_name: Name of the database to connect to.
-    :return: The populated Models set.
-    """
-    if not cursor or not db_name:
-        raise SystemExit("A successful connection to the database must be established before the ORM may be initialized")
-
-    global Models  # Make a reference to the global Models dictionary.
-
-    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
-    cursor.execute(f"USE {db_name}")
-    cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
-    table_names = [table_tuple[0] for table_tuple in cursor]
-
-    def get_columns(table_name:str):
-        cursor.execute(f"SHOW COLUMNS FROM {db_name}.{table_name}")
-        columndata = *(column for column in cursor),
-        # Returns a tuple of the things we need (All metadata for columns, and the primary key column).
-        return columndata, next(col[0] for col in columndata if col[3] == 'PRI')
-
-    for name in table_names:
-        columns, pk_column = get_columns(name)  # Get the needed column data for the current model.
-
-        # Declare the new model, and populate it with attributes.
-        # The fields dictionary will hold the values contained within an instance of the model.
-        model = type(name, (DBModel,), model_overrides or {})
-
-        # We add Meta to the model after declaration, such that it may refer back to its model.
-        metadata = {
-            'fields': tuple(ModelField(column) for column in columns),
-            'fieldnames': tuple(column[0] for column in columns),
-            'pk_column': pk_column,
-            'table_name': name,
-            'column_data': columns,
-        }
-
-        model.Meta = type('Meta', (DBModel.Meta,), metadata)
-
-        # Once we're finished with the current model, we add it to the dictionary which will hold them all.
-        Models[name] = model  # We use typehinting to indicate attributes that cannot be inferred from our generic type.
-
-    # Populate the global _foreignkey_relationships dictionary.
-    global _foreignkey_relationships
-
-    # Get all foreignkey relationships in the database.
-    cursor.execute("""
-        SELECT
-            TABLE_NAME,
-            COLUMN_NAME,
-            CONSTRAINT_NAME,
-            REFERENCED_TABLE_NAME,
-            REFERENCED_COLUMN_NAME
-        FROM
-            INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-        WHERE
-            REFERENCED_TABLE_SCHEMA = 'myqueryhouse'
-    """)
-
-    for row in cursor:
-        if row[0] in _foreignkey_relationships:
-            _foreignkey_relationships[row[0]].update({row[1]: (row[3], row[4])})
-        else:
-            _foreignkey_relationships[row[0]] = {row[1]: (row[3], row[4])}
-
-    return Models
