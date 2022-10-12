@@ -47,7 +47,7 @@ class LazyQueryDict(dict):
                 (field for field in self.__instance.Meta.fields if
                  field.type == FieldTypes.FOREIGN_KEY.value and field.name == k), None):
             model = self.__instance.model
-            fk_names = _foreignkey_relationships[model.Meta.table_name][k]
+            fk_names = _foreignkey_relationships[model.meta.table_name][k]
             self[k] = item = Models[fk_names[0]].objects.get(**{fk_names[1]: item})
 
         return item
@@ -89,7 +89,7 @@ class QuerySet:
         """ Performs the query and caches the result. """
         try: CONNECTION.consume_results()
         except Exception: pass
-        current_table: str = self.model.Meta.table_name
+        current_table: str = self.model.meta.table_name
         CURSOR.execute(f"SELECT * FROM {DATABASE_NAME}.{current_table}")
         buffer = *(i for i in CURSOR),  # Buffer needed for certain tables for some reason.
         self._result = [Models[current_table](obj) for obj in buffer]
@@ -103,7 +103,7 @@ class QuerySet:
         try: CONNECTION.consume_results()
         except Exception: pass
 
-        current_table: str = self.model.Meta.table_name
+        current_table: str = self.model.meta.table_name
         CURSOR.execute(f"SELECT * FROM {DATABASE_NAME}.{current_table} WHERE {'AND'.join(('{} = {}'.format(key, value) for key, value in kwargs.items()))}")
         buffer: list[DBModel] = [Models[current_table](obj) for obj in CURSOR]
 
@@ -222,12 +222,12 @@ class DBModel(metaclass=_DBModelMeta):
             self.values = LazyQueryDict(self, **kwargs)
         else:
             # Zip the data correctly, such that we pair column names with their values.
-            data = zipped_data or zip(self.Meta.fieldnames, *args) or {field: None for field in self.Meta.fieldnames}
+            data = zipped_data or zip(self.meta.fields.keys(), args) or {field: None for field in self.meta.fields.keys()}
             # Convert the result to a dictionary.
             datadict = {fieldname: value for fieldname, value in data}
 
             # Take care that we don't set invalid fields for the instance.
-            invalid_fields = set(datadict.keys()).difference(set(self.Meta.fieldnames))
+            invalid_fields = set(datadict.keys()).difference(set(self.meta.fields.keys()))
             if invalid_fields: raise AttributeError(f"{invalid_fields} are not valid fields for {self.model}")
 
             # Merge the values into the class.
@@ -242,7 +242,7 @@ class DBModel(metaclass=_DBModelMeta):
     @property
     def pk(self) -> int:
         """ Returns the value of the current instance's primary key. """
-        return self.values.get(self.Meta.pk_column, None)
+        return self.values.get(self.meta.pk_column, None)
 
     def save(self) -> None:  # TODO Kevin: Test save.
         """ Saves or updates the current instance in the database. """
@@ -250,10 +250,10 @@ class DBModel(metaclass=_DBModelMeta):
         diff = {column: value for column, value in self.values if (value or self._initial_values[column])}
         if self.pk:
             values = str(tuple(f"{column} = |||{value}|||" for column, value in diff.items()))[1:-2].replace(r"'",'').replace('|||', r"'")
-            CURSOR.execute(f"UPDATE {self.Meta.table_name} SET {values} WHERE {self.Meta.pk_column} = {self.pk}")
+            CURSOR.execute(f"UPDATE {self.meta.table_name} SET {values} WHERE {self.meta.pk_column} = {self.pk}")
         else:
             columns, values = diff.items()
-            CURSOR.execute(f"INSERT INTO {self.Meta.table_name}({columns}) VALUES {values}")
+            CURSOR.execute(f"INSERT INTO {self.meta.table_name}({columns}) VALUES {values}")
 
     def delete(self): raise NotImplementedError("Cannot delete yet!")
 
@@ -263,7 +263,7 @@ class DBModel(metaclass=_DBModelMeta):
 
     def __eq__(self, o: object) -> bool:
         try:
-            return self.Meta.table_name == o.Meta.table_name and self.pk == o.pk and self.values == o.values
+            return self.meta.table_name == o.meta.table_name and self.pk == o.pk and self.values == o.values
         except AttributeError:
             return False
 
