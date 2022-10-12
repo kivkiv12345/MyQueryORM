@@ -7,17 +7,15 @@ if __name__ == '__main__':
     raise SystemExit("(⊙＿⊙') Wha!?... Are you trying to run orm.py?\n"
                      " You know this is a bad idea; right? You should run app.py instead :)")
 
-from typing import Any, Union, ItemsView, ValuesView, Type, NamedTuple
-from mysql.connector.cursor import CursorBase
-from mysql.connector.connection import MySQLConnection
-try:
-    from mysql.connector.cursor_cext import CMySQLCursor
-except ImportError:
-    # Importation of CMySQLCursor fails on Windows, for some reason.
-    CMySQLCursor = None  # Avoid typehint NameError on failed import.
 from copy import copy
+from inspect import isclass
+from .utils import ConnectionSingleton
+from mysql.connector.cursor import CursorBase
+from resources.init import foreignkey_relationships
+from mysql.connector.connection import MySQLConnection
 from resources.enums import FieldTypes, DatabaseLocations
 from resources.exceptions import AbstractInstantiationError
+from typing import Any, Union, ItemsView, ValuesView, Type, NamedTuple
 
 
 class LazyQueryDict(dict):
@@ -47,7 +45,7 @@ class LazyQueryDict(dict):
                 (field for field in self.__instance.Meta.fields if
                  field.type == FieldTypes.FOREIGN_KEY.value and field.name == k), None):
             model = self.__instance.model
-            fk_names = _foreignkey_relationships[model.meta.table_name][k]
+            fk_names = foreignkey_relationships[model.meta.table_name][k]
             self[k] = item = Models[fk_names[0]].objects.get(**{fk_names[1]: item})
 
         return item
@@ -156,8 +154,7 @@ class ModelField:
     def __str__(self) -> str: return self.name
 
 
-Models: set["DBModel"] = set()
-_foreignkey_relationships: dict[str, dict[str, tuple[str, str]]] = {}
+Models: dict[str, Type["DBModel"]] = {}
 
 
 class _DBModelMeta(type):
@@ -169,7 +166,29 @@ class _DBModelMeta(type):
     def __init__(cls, name: str, bases: tuple, dct: dict) -> None:
         try:
             if DBModel is not None:  # meta __init__ is also called for DBModel, which is not a database table.
-                Models.add(cls)
+                Models[name] = cls  # TODO Kevin: This will break if we allow class and tables names to differ.
+
+            # Create lazy getters for foreignkey fields
+            for field, value in dct.items():
+                fk_model: Type[DBModel] = None
+                if isclass(value) and issubclass(value, DBModel):
+                    fk_model = value
+                elif dct.get('__annotations__', {}).get(field, None) is DBModel and isinstance(value, str):
+                    fk_model = Models[value]
+                #elif # TODO Kevin: Check for ForeignkeyField here
+
+                if fk_model:
+                    def lazy_foreignkey_getter(self):
+                        if isinstance(self._fk_cache[field], int):  # This row has not been queried yet
+                            fk_names = foreignkey_relationships[self.meta.table_name][fk_model.meta.table_name + 'ID']
+
+                            # fk_names[1] == name of the PK column on the foreignkey model
+                            # self._fk_cache[field] == currently the PK of the foreignkey instance
+                            self._fk_cache[field] = fk_model.objects.get(**{fk_names[1]: self._fk_cache[field]})
+                        return self._fk_cache[field]
+
+                    dct[field] = property(lazy_foreignkey_getter)
+
         except NameError:
             pass  # This will be called on DBModel itself, before it is defined.
         super().__init__(cls)
@@ -187,6 +206,7 @@ class ModelMeta(NamedTuple):
     table_name: str
     database_name: str
     fields: dict[str, Any]
+    connection: ConnectionSingleton = None
 
     def __str__(self) -> str:
         return f"Meta for {self.table_name}"
@@ -196,9 +216,10 @@ class DBModel(metaclass=_DBModelMeta):
     """ Django'esque model class which converts table rows to Python class instances. """
 
     model = None
-    values: dict[str, Any] = None  # Holds the values of the instances.
+    # values: dict[str, Any] = None  # Holds the values of the instances.
     _initial_values: dict[str, Any] = None  # Holds the initial values for comparison when saving.
-    meta: ModelMeta = None
+    _fk_cache: dict[str, int]  # TODO Kevin: Put PKs in this when querying
+    meta: ModelMeta = None  # Class variable describing the model
 
     def __init__(self, *args, zipped_data: zip = None, **kwargs) -> None:
         """
@@ -219,7 +240,7 @@ class DBModel(metaclass=_DBModelMeta):
         if kwargs:
             invalid_field = next((field for field in kwargs.keys() if field not in {metafield.name for metafield in self.Meta.fields}), None)
             if invalid_field: raise AttributeError(f"{invalid_field} is not a valid field for {self.model}")
-            self.values = LazyQueryDict(self, **kwargs)
+            values = kwargs
         else:
             # Zip the data correctly, such that we pair column names with their values.
             data = zipped_data or zip(self.meta.fields.keys(), args) or {field: None for field in self.meta.fields.keys()}
@@ -231,11 +252,11 @@ class DBModel(metaclass=_DBModelMeta):
             if invalid_fields: raise AttributeError(f"{invalid_fields} are not valid fields for {self.model}")
 
             # Merge the values into the class.
-            self.values = LazyQueryDict(self, **datadict)
+            values = datadict
 
         # We run these assignments sequentially,
         # to ensure that the primary key is removed from the dictionary, before it is copied.
-        self._initial_values = copy(self.values)
+        self._initial_values = copy(values)
 
         super().__init__()
 
@@ -246,14 +267,25 @@ class DBModel(metaclass=_DBModelMeta):
 
     def save(self) -> None:  # TODO Kevin: Test save.
         """ Saves or updates the current instance in the database. """
-        raise NotImplementedError("Save method is currently not finished.")
-        diff = {column: value for column, value in self.values if (value or self._initial_values[column])}
-        if self.pk:
+        # raise NotImplementedError("Save method is currently not finished.")
+        cursor = self.meta.connection.cursor
+        # TODO Kevin: Runtime reflection here; please fix next patch. Also just terrible
+        diff = {fieldname: (val := getattr(self, fieldname)) for fieldname in self.meta.fields.keys() if (fieldname in self._initial_values and val != self._initial_values[fieldname])}
+
+        if self.pk:  # Update existing row
             values = str(tuple(f"{column} = |||{value}|||" for column, value in diff.items()))[1:-2].replace(r"'",'').replace('|||', r"'")
-            CURSOR.execute(f"UPDATE {self.meta.table_name} SET {values} WHERE {self.meta.pk_column} = {self.pk}")
-        else:
-            columns, values = diff.items()
-            CURSOR.execute(f"INSERT INTO {self.meta.table_name}({columns}) VALUES {values}")
+            cursor.execute(f"UPDATE {self.meta.table_name} SET {values} WHERE {self.meta.pk_column} = {self.pk}")
+        else:  # Insert new row
+            temp_dict = (diff or {'': ''})
+            columns, values = tuple(temp_dict.keys()), tuple(temp_dict.values())
+            # TODO Kevin: LOCK TABLE '{self.meta.table_name}'
+            cursor.execute(f"INSERT INTO {self.meta.table_name}({', '.join(columns)}) VALUES ({', '.join(values)})")
+            self.meta.connection.connection.commit()
+
+            # Get our PK
+            cursor.execute(f"SELECT MAX({self.meta.pk_column}) FROM {self.meta.table_name}")
+            # TODO Kevin: UNLOCK TABLES
+            self.values[self.meta.pk_column] = next(cursor)[0]
 
     def delete(self): raise NotImplementedError("Cannot delete yet!")
 

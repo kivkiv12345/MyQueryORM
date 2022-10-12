@@ -1,5 +1,5 @@
 from typing import NamedTuple, Any
-from resources.orm import DBModel
+from resources import orm
 
 
 class StringField(NamedTuple):
@@ -11,6 +11,6 @@ class PKField(NamedTuple):
 
 
 class ForeignkeyField(NamedTuple):
-    model: DBModel
+    model: 'orm.DBModel'
     null: bool = None
     on_delete = None
