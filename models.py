@@ -10,5 +10,5 @@ class NotSQLGroup(DBModel):
 
 class User(DBModel):
     name: str = StringField(64)
-    age: int
+    age: int = 0  # TODO Kevin: Should it be possible to create fields from annotations alone?
     group: DBModel = NotSQLGroup

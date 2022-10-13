@@ -220,6 +220,7 @@ class DBModel(metaclass=_DBModelMeta):
     _initial_values: dict[str, Any] = None  # Holds the initial values for comparison when saving.
     _fk_cache: dict[str, int]  # TODO Kevin: Put PKs in this when querying
     meta: ModelMeta = None  # Class variable describing the model
+    _pk: int = None  # Contains the actual PK  # TODO Kevin: Would prefer if this was not hardcoded to an int.
 
     def __init__(self, *args, zipped_data: zip = None, **kwargs) -> None:
         """
@@ -258,34 +259,36 @@ class DBModel(metaclass=_DBModelMeta):
         # to ensure that the primary key is removed from the dictionary, before it is copied.
         self._initial_values = copy(values)
 
+        self._fk_cache = {}
+
         super().__init__()
 
     @property
     def pk(self) -> int:
         """ Returns the value of the current instance's primary key. """
-        return self.values.get(self.meta.pk_column, None)
+        return self._pk
 
     def save(self) -> None:  # TODO Kevin: Test save.
         """ Saves or updates the current instance in the database. """
         # raise NotImplementedError("Save method is currently not finished.")
         cursor = self.meta.connection.cursor
-        # TODO Kevin: Runtime reflection here; please fix next patch. Also just terrible
-        diff = {fieldname: (val := getattr(self, fieldname)) for fieldname in self.meta.fields.keys() if (fieldname in self._initial_values and val != self._initial_values[fieldname])}
 
         if self.pk:  # Update existing row
+            # TODO Kevin: Runtime reflection here; please fix next patch. Also just terrible
+            diff = {fieldname: (val := getattr(self, fieldname)) for fieldname in self.meta.fields.keys() if (fieldname in self._initial_values and val != self._initial_values[fieldname])}
             values = str(tuple(f"{column} = |||{value}|||" for column, value in diff.items()))[1:-2].replace(r"'",'').replace('|||', r"'")
             cursor.execute(f"UPDATE {self.meta.table_name} SET {values} WHERE {self.meta.pk_column} = {self.pk}")
         else:  # Insert new row
-            temp_dict = (diff or {'': ''})
-            columns, values = tuple(temp_dict.keys()), tuple(temp_dict.values())
+            # TODO Kevin: Runtime reflection here; please fix next patch. Also just terrible
+            valdict = {fieldname: str(getattr(self, fieldname)) for fieldname in self.meta.fields.keys()}
             # TODO Kevin: LOCK TABLE '{self.meta.table_name}'
-            cursor.execute(f"INSERT INTO {self.meta.table_name}({', '.join(columns)}) VALUES ({', '.join(values)})")
+            cursor.execute(f"INSERT INTO {self.meta.table_name}({', '.join(valdict.keys())}) VALUES ({', '.join(valdict.values())})")
             self.meta.connection.connection.commit()
 
             # Get our PK
             cursor.execute(f"SELECT MAX({self.meta.pk_column}) FROM {self.meta.table_name}")
             # TODO Kevin: UNLOCK TABLES
-            self.values[self.meta.pk_column] = next(cursor)[0]
+            self._pk = next(cursor)[0]
 
     def delete(self): raise NotImplementedError("Cannot delete yet!")
 
