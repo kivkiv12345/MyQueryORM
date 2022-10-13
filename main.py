@@ -24,3 +24,8 @@ if __name__ == '__main__':
             create_tables(connection, db_name)
             connect_orm(connection, db_name)
 
+            user = User()
+            user.name = 'lololo'
+            user.save()
+            print(user)
+

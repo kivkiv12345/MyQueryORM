@@ -128,8 +128,8 @@ def create_tables(connection: ConnectionSingleton, db_name: str):
             return f"{fieldname} varchar({fieldtype.length})"
         elif _isinstanceorsubclass(fieldtype, int):
             return f"{fieldname} int"
-        elif _isinstanceorsubclass(fieldtype, orm.DBModel):  # Foreign key
-            return f"{fieldtype.meta.pk_column} int"
+        elif _isinstanceorsubclass(fieldtype, orm.LazygetterWrapper):  # Foreign key
+            return f"{fieldtype.model.meta.pk_column} int"
         else:
             raise TypeError(f"Cannot create column for field of type {fieldtype}")
 
