@@ -24,8 +24,22 @@ if __name__ == '__main__':
             create_tables(connection, db_name)
             connect_orm(connection, db_name)
 
-            user = User()
-            user.name = 'lololo'
-            user.save()
-            print(user)
+            new_user = User()
+            new_user.name = 'hejmeddig'
+            new_user.age = 3
+            new_user.save()
+
+            try:
+                db_user: User = User.objects.get(UserID=3)
+            except Exception:
+                exit()
+            print(db_user.name, db_user.age)
+            db_user.name += '2'
+            db_user.age += 1
+            db_user.save()
+            print(db_user.name, db_user.age)
+
+            db_user.delete()
+            db_user: User = User.objects.get(UserID=3)
+
 
