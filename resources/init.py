@@ -98,7 +98,7 @@ def connect_orm(connection: ConnectionSingleton, db_name: str) -> set['orm.DBMod
     return orm.Models
 
 
-def create_tables(connection: ConnectionSingleton, db_name: str):
+def create_tables(connection: ConnectionSingleton, db_name: str) -> None:
     """
     Create tables from models in the database. Constitutes the initial migration.
 

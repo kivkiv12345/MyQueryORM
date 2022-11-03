@@ -21,52 +21,24 @@ from resources.exceptions import AbstractInstantiationError
 from typing import Any, Union, ItemsView, ValuesView, Type, NamedTuple, Callable
 
 
-class LazyQueryDict(dict):
-    """ This dictionary subclass lazily queries related foreignkey rows when retrieved. """
-    __instance = None  # instance is private, as it should not be included when values are retrieved.
+class Q:
+    _conditions: list[dict[str, Any], ...] = None
 
-    def __init__(self, instance, **kwargs) -> None:
-        """
-        :param instance: The instance of a DBModel subclass that this dictionary is linked to.
-        :param kwargs: Keyword arguments passed to the original dictionary constructor.
-        """
-        super().__init__(**kwargs)
-        self.__instance: DBModel = instance
+    def __init__(self, **conditions) -> None:
+        if not conditions:
+            raise ValueError("No conditions specified for Q() instance")
+        self._conditions = [conditions]
+        super().__init__()
 
-    def __getitem__(self, k: Any) -> Any:
-        """
-        Checks the value and type of the specified key to determine
-        if a query should be performed before the value is returned.
+    def __or__(self, other: 'Q'):
+        if not isinstance(other, Q):
+            raise TypeError("OR with Q() instances, can only be done with other Q() instances.")
+        self._conditions += other._conditions
 
-        :param k: the specified key to retrieve the value of.
-        """
-
-        # May raise KeyError
-        item: Any = super().__getitem__(k)
-
-        if k in self and type(item) is int and next(
-                (field for field in self.__instance.Meta.fields if
-                 field.type == FieldTypes.FOREIGN_KEY.value and field.name == k), None):
-            model = self.__instance.model
-            fk_names = foreignkey_relationships[model.meta.table_name][k]
-            self[k] = item = Models[fk_names[0]].objects.get(**{fk_names[1]: item})
-
-        return item
-
-    def _fetch_all(self) -> None:  # TODO Kevin: Consider whether this method should be converted to an annotation.
-        """ Prefetches all contained foreignkeys. """
-        for key in self.keys():
-            self[key]  # Forces the foreignkey to be evaluated.
-
-    def values(self) -> ValuesView[Any]:
-        """ Preemptively evaluates all contained foreignkeys before returning super. """
-        self._fetch_all()
-        return super().values()
-
-    def items(self) -> ItemsView[str, Any]:
-        """ Preemptively evaluates all contained foreignkeys before returning super. """
-        self._fetch_all()
-        return super().items()
+    def __and__(self, other):
+        if not isinstance(other, Q):
+            raise TypeError("OR with Q() instances, can only be done with other Q() instances.")
+        self._conditions[-1] |= {key:val for d in other._conditions for key,val in d.items()}
 
 
 class QuerySet:
@@ -74,9 +46,10 @@ class QuerySet:
     Django'esque queryet class which allows for retrieving a list of models from the database.
     Currently only able to retrieve all rows of a table.
     """
-    model = None
-    _evaluated = False
-    _result: list = None
+    model: 'DBModel' = None
+    _result: tuple['DBModel', ...] = None
+    _filter: str = None
+    _values: list[str] = None
 
     def __init__(self, model) -> None:
         """
@@ -94,16 +67,21 @@ class QuerySet:
 
         try: connection.consume_results()
         except Exception: pass
+
         current_table: str = self.model.meta.table_name
-        cursor.execute(f"SELECT * FROM {self.model.meta.database_name}.{current_table}")
+        sql = f"SELECT * FROM {self.model.meta.database_name}.{current_table}"
+        if self._filter:
+            sql += f"WHERE {self._filter}"
+
+        cursor.execute(f"SELECT * FROM {self.model.meta.database_name}.{current_table} {self._filter}")
+
         buffer = *(i for i in cursor),  # Buffer needed for certain tables for some reason.
-        self._result = [Models[current_table](obj) for obj in buffer]
-        self._evaluated = True
+        self._result = *(Models[current_table](obj) for obj in buffer),
         return self
 
-    def get(self, **kwargs):
+    def filter(self, **kwargs):
         if not kwargs:
-            raise ValueError("No conditions specified for QuerySet.get")
+            raise ValueError("No conditions specified for QuerySet.filter")
 
         connection = self.model.meta.connection.connection
         cursor = self.model.meta.connection.cursor
@@ -111,30 +89,47 @@ class QuerySet:
         try: connection.consume_results()
         except Exception: pass
 
+        # Format kwargs for query
+        for arg, value in kwargs.items():  # TODO Kevin: Maybe check for SQL injection here, also should probably use _sql_value_formatter()
+            if isinstance(value, str):  # Strings should be quoted
+                kwargs[arg] = f"\'{value}\'"
+
         def _init_values(row: tuple[Any, ...]) -> DBModel:
+            """ Also set the primary key for model instances retrieved from the database. """
             obj = self.model(*(row[1:]))
             obj._pk = row[0]
             return obj
 
         cursor.execute(f"SELECT * FROM {self.model.meta.database_name}.{self.model.meta.table_name} WHERE {'AND'.join(('{} = {}'.format(key, value) for key, value in kwargs.items()))}")
-        buffer: list[Any] = [_init_values(obj) for obj in cursor]
+        self._result: list[Any] = [_init_values(obj) for obj in cursor]
+        return self
 
-        if len(buffer) < 1:
-            raise Exception("Get did not return any results.")
-        elif len(buffer) > 1:
-            raise Exception("Get returned more than one result.")
+    def get(self, **kwargs):
 
-        self._result, self._evaluated = buffer, True
-        return buffer[0]
+        self.filter(**kwargs)
+
+        if len(self._result) < 1:
+            raise LookupError("Get did not return any results.")
+        elif len(self._result) > 1:
+            raise LookupError("Get returned more than one result.")
+
+        return self._result[0]
 
     def __iter__(self):
-        if not self._evaluated: self.evaluate()
+        if self._result is None:
+            self.evaluate()
         for instance in self._result:
             yield instance
 
     def __len__(self):
-        if not self._evaluated: self.evaluate()
+        if self._result is None:
+            self.evaluate()
         return len(self._result)
+
+    def __getitem__(self, item):
+        if self._result is None:
+            self.evaluate()
+        return self._result[item]
 
     def create(self, **kwargs):
         """ Creates an instance of the specified model, saves it to the database, and returns it to the user. """
@@ -276,8 +271,6 @@ class DBModel(metaclass=_DBModelMeta):
 
         # Allow a more readable way to access the class itself from its instances.
         self.model: Type[DBModel] = self.__class__
-
-        print('hahahaha', args)
 
         self._fk_cache = {}
 
